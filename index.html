@@ -407,6 +407,8 @@
 
 <!-- QRCode library -->
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<!-- MediaPipe Selfie Segmentation -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
 
 <script type="module">
 /* ════════════════════════════════════════════════
@@ -514,32 +516,20 @@ window.handleFile = function(e) {
 };
 
 /* ════════════════════════════════════════════════
-   Step 3 — AI 去背 + 合成
+   Step 3 — AI 去背（MediaPipe）+ 合成
    ════════════════════════════════════════════════ */
 async function processPhoto() {
   showStep(3);
 
   try {
-    setProc('正在載入 AI 模型…', '首次使用需下載模型（約 30–90 秒），之後會更快');
+    setProc('正在載入 AI 模型…', '約需 5–15 秒，請稍候');
 
-    // dynamic import so it doesn't block initial load
-    const { removeBackground } = await import(
-      'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/dist/browser.mjs'
-    );
-
-    setProc('AI 去背處理中…', '正在移除照片背景，請稍候');
-
-    const personBlob = await removeBackground(photoBlob, {
-      publicPath: 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/dist/',
-      model: 'small',
-      output: { type: 'foreground', format: 'image/png' },
-    });
+    const personBlob = await removeBg(photoBlob);
 
     setProc('合成外框中…', '');
 
     resultCanvas = await composite(personBlob);
 
-    // copy to display canvas
     const display = document.getElementById('resultCanvas');
     display.width  = resultCanvas.width;
     display.height = resultCanvas.height;
@@ -552,6 +542,54 @@ async function processPhoto() {
     showStep(2);
     await startCamera();
   }
+}
+
+/* ── MediaPipe 去背 ──
+   使用 Google SelfieSegmentation，mask 白色 = 人、黑色 = 背景 */
+function removeBg(blob) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const img = await loadImg(URL.createObjectURL(blob));
+
+      const seg = new SelfieSegmentation({
+        locateFile: (f) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}`,
+      });
+      seg.setOptions({ modelSelection: 1 });
+
+      seg.onResults(({ segmentationMask, image }) => {
+        const W = img.naturalWidth;
+        const H = img.naturalHeight;
+
+        // 畫原始人像
+        const out = document.createElement('canvas');
+        out.width = W; out.height = H;
+        const ctx = out.getContext('2d');
+        ctx.drawImage(image, 0, 0, W, H);
+
+        // 取 mask 像素值，寫入 alpha
+        const maskC = document.createElement('canvas');
+        maskC.width = W; maskC.height = H;
+        maskC.getContext('2d').drawImage(segmentationMask, 0, 0, W, H);
+        const maskPx = maskC.getContext('2d').getImageData(0, 0, W, H);
+
+        const imgData = ctx.getImageData(0, 0, W, H);
+        for (let i = 0; i < imgData.data.length; i += 4) {
+          imgData.data[i + 3] = maskPx.data[i]; // red channel = mask value
+        }
+        ctx.putImageData(imgData, 0, 0);
+
+        out.toBlob(resolve, 'image/png');
+        seg.close();
+      });
+
+      await seg.initialize();
+      setProc('AI 去背處理中…', '正在移除照片背景');
+      await seg.send({ image: img });
+    } catch (e) {
+      reject(e);
+    }
+  });
 }
 
 function setProc(title, note) {
